@@ -175,12 +175,15 @@ async def process(m: Message, item: FileItem, status: Message, user_id: int | No
     limit = config.MAX_UPLOAD_MB * 1024 * 1024
     name = html.escape(item.name)
     if not item.dlink or item.size > limit:
-        why = "too large for Telegram upload" if item.size > limit else "ready"
-        text = f"📄 <b>{name}</b> ({human(item.size)}) — {why}."
-        if item.dlink:
-            text += f"\n\n<a href=\"{html.escape(item.dlink, quote=True)}\">Direct download link</a> (expires in a few hours)"
+        text = f"📄 <b>{name}</b> ({human(item.size)})"
+        if not item.dlink:
+            hint = ("" if config.TERABOX_COOKIE else
+                    " The bot has no TeraBox cookie configured — set TERABOX_COOKIE.")
+            text += "\n❌ TeraBox did not return a download link for this file." + hint
         else:
-            text += "\nNo direct link available (TeraBox may require a logged-in cookie)."
+            text += ("\n⚠️ Too large for Telegram upload.\n\n"
+                     f"<a href=\"{html.escape(item.dlink, quote=True)}\">Direct download link</a> "
+                     "(expires in a few hours)")
         return await safe_edit(status, text, disable_web_page_preview=True)
 
     _active[uid] = _active.get(uid, 0) + 1
@@ -233,6 +236,8 @@ async def process(m: Message, item: FileItem, status: Message, user_id: int | No
 async def main():
     global tb
     await db.init()
+    if not config.TERABOX_COOKIE:
+        log.warning('TERABOX_COOKIE is empty: most shares will return no download link')
     api = TelegramAPIServer.from_base(config.LOCAL_API_URL) if config.LOCAL_API_URL else None
     session = AiohttpSession(api=api) if api else AiohttpSession()
     bot = Bot(config.BOT_TOKEN, session=session,
@@ -247,4 +252,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-  
+    
