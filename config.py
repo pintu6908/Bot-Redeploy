@@ -23,3 +23,4 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 STREAM_TTL_SEC = 6 * 3600
 MAX_STREAMS = int(os.getenv("MAX_STREAMS", "20"))
+AUTO_TUNNEL = os.getenv("AUTO_TUNNEL", "0") == "1"  # start a cloudflared quick tunnel automatically
