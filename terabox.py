@@ -7,7 +7,6 @@ Uses the same web endpoints the TeraBox site uses (unofficial, may change):
 from __future__ import annotations
 
 import asyncio
-import html as html_lib
 import logging
 import re
 from dataclasses import dataclass
@@ -34,15 +33,10 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 VIDEO_EXT = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
 
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
-# TeraBox's token is often a JS fragment value, not always hex. Accept the common
-# forms seen across the site and newer builds.
 _TOKEN_PATTERNS = (
-    re.compile(r"fn%28%22([^%\"]+)%22%29", re.I),
-    re.compile(r"fn\(\s*[\"']?([A-Za-z0-9_-]+)[\"']?\s*\)", re.I),
-    re.compile(r"jsToken\s*[:=]\s*[\"']?([A-Za-z0-9_-]+)[\"']?", re.I),
-    re.compile(r"[\"']jsToken[\"']\s*:\s*[\"']([A-Za-z0-9_-]+)[\"']", re.I),
-    re.compile(r"jsToken\s*[:=]\s*%22([^%]+)%22", re.I),
-    re.compile(r"token\s*[:=]\s*[\"']?([A-Za-z0-9_-]+)[\"']?", re.I),
+    re.compile(r"fn%28%22([^%\"]+)%22%29"),
+    re.compile(r"fn\(\"([0-9A-Fa-f]+)\"\)"),
+    re.compile(r"jsToken\"?\s*[:=]\s*\"([0-9A-Fa-f]+)\""),
 )
 
 
@@ -109,16 +103,12 @@ class TeraBoxClient:
         url = f"https://{host}/sharing/link?surl={surl_q}"
         async with self.s.get(url, headers=self._headers(), allow_redirects=True,
                               timeout=aiohttp.ClientTimeout(total=25)) as r:
-            html_text = await r.text()
+            html = await r.text()
             base = f"{r.url.scheme}://{r.url.host}"
-
-        decoded = html_lib.unescape(html_text)
         for pat in _TOKEN_PATTERNS:
-            m = pat.search(decoded)
+            m = pat.search(html)
             if m:
-                token = m.group(1).strip()
-                if token and len(token) >= 4:
-                    return token, base
+                return m.group(1), base
         raise TeraError("Could not read page token (link invalid, deleted, or TeraBox changed).")
 
     async def _list(self, base: str, token: str, shorturl: str, directory: str | None) -> list[dict]:
@@ -145,6 +135,50 @@ class TeraBoxClient:
                 return items
             page += 1
 
+    async def _shorturlinfo(self, base: str, token: str, shorturl: str) -> dict:
+        params = {"app_id": "250528", "web": "1", "channel": "dubox", "clienttype": "0",
+                  "jsToken": token, "shorturl": shorturl, "root": "1"}
+        async with self.s.get(f"{base}/api/shorturlinfo", params=params,
+                              headers=self._headers(f"{base}/sharing/link?surl={shorturl}"),
+                              timeout=aiohttp.ClientTimeout(total=25)) as r:
+            data = await r.json(content_type=None)
+        if data.get("errno") not in (0, None):
+            log.warning("shorturlinfo errno=%s msg=%s", data.get("errno"), data.get("errmsg"))
+            return {}
+        return data
+
+    async def _share_download(self, base: str, token: str, info: dict, fs_id: str) -> str | None:
+        params = {"app_id": "250528", "web": "1", "channel": "dubox", "clienttype": "0",
+                  "jsToken": token, "sign": str(info.get("sign", "")),
+                  "timestamp": str(info.get("timestamp", "")), "shareid": str(info.get("shareid", "")),
+                  "uk": str(info.get("uk", "")), "product": "share", "nozip": "0",
+                  "fid_list": f"[{fs_id}]"}
+        async with self.s.get(f"{base}/share/download", params=params,
+                              headers=self._headers(f"{base}/"),
+                              timeout=aiohttp.ClientTimeout(total=25)) as r:
+            data = await r.json(content_type=None)
+        if data.get("errno") not in (0, None):
+            log.warning("share/download errno=%s msg=%s", data.get("errno"),
+                        data.get("errmsg") or data.get("show_msg"))
+            return None
+        return data.get("dlink") or ((data.get("list") or [{}])[0].get("dlink"))
+
+    async def _fill_dlinks(self, base, token, shorturl, files: list[FileItem], cap: int = 10):
+        missing = [f for f in files if not f.dlink][:cap]
+        if not missing:
+            return
+        try:
+            info = await self._shorturlinfo(base, token, shorturl)
+            if not info:
+                return
+            for f in missing:
+                try:
+                    f.dlink = await self._share_download(base, token, info, f.fs_id)
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+                    log.warning("share/download failed for %s: %s", f.name, e)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            log.warning("dlink fallback failed: %s", e)
+
     async def resolve(self, url: str, max_files: int = 200) -> list[FileItem]:
         full = parse_surl(url)
         if not full:
@@ -162,7 +196,9 @@ class TeraBoxClient:
                             last = e
                             continue
                         if raw:
-                            return await self._expand(base, token, sh, raw, max_files)
+                            files = await self._expand(base, token, sh, raw, max_files)
+                            await self._fill_dlinks(base, token, sh, files)
+                            return files
                     break  # token worked but no list; try next host
                 except TeraError as e:
                     last = e
@@ -203,10 +239,7 @@ class TeraBoxClient:
             async with self.s.get(url, headers=headers, allow_redirects=False,
                                   timeout=aiohttp.ClientTimeout(total=None, sock_connect=20, sock_read=60)) as r:
                 if r.status in (301, 302, 303, 307, 308):
-                    location = r.headers.get("Location")
-                    if not location:
-                        raise TeraError("Download redirect was missing a Location header.")
-                    url = str(URL(location))
+                    url = str(r.url.join(URL(r.headers["Location"])))
                     continue
                 if r.status >= 400:
                     raise TeraError(f"Download server returned HTTP {r.status} (link may have expired).")
