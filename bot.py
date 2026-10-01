@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import aiohttp
+import aiohttp.web
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -16,10 +17,11 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import config
+import web
 from db import DB
 from terabox import VIDEO_EXT, FileItem, TeraBoxClient, TeraError, extract_links
 
@@ -181,9 +183,16 @@ async def process(m: Message, item: FileItem, status: Message, user_id: int | No
                     " The bot has no TeraBox cookie configured — set TERABOX_COOKIE.")
             text += "\n❌ TeraBox did not return a download link for this file." + hint
         else:
-            text += ("\n⚠️ Too large for Telegram upload.\n\n"
-                     f"<a href=\"{html.escape(item.dlink, quote=True)}\">Direct download link</a> "
-                     "(expires in a few hours)")
+            text += "\n⚠️ Too large for Telegram upload."
+            kb = InlineKeyboardBuilder()
+            if config.PUBLIC_BASE_URL and Path(item.name).suffix.lower() in VIDEO_EXT:
+                url = web.play_url(web.create_stream(item))
+                if m.chat.type == "private":
+                    kb.button(text="▶️ Play video", web_app=WebAppInfo(url=url))
+                else:
+                    kb.button(text="▶️ Play video", url=url)
+                return await safe_edit(status, text, reply_markup=kb.as_markup())
+            text += f"\n\n<a href=\"{html.escape(item.dlink, quote=True)}\">Direct download link</a> (expires in a few hours)"
         return await safe_edit(status, text, disable_web_page_preview=True)
 
     _active[uid] = _active.get(uid, 0) + 1
@@ -244,12 +253,19 @@ async def main():
               default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=50)) as http:
         tb = TeraBoxClient(http, config.TERABOX_COOKIE)
+        runner = None
+        if config.PUBLIC_BASE_URL:
+            runner = aiohttp.web.AppRunner(web.make_app(tb))
+            await runner.setup()
+            await aiohttp.web.TCPSite(runner, "0.0.0.0", config.WEB_PORT).start()
+            log.info("Stream server on :%s -> %s", config.WEB_PORT, config.PUBLIC_BASE_URL)
         try:
             await dp.start_polling(bot)
         finally:
+            if runner:
+                await runner.cleanup()
             await db.close()
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
