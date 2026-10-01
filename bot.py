@@ -192,6 +192,8 @@ async def process(m: Message, item: FileItem, status: Message, user_id: int | No
                 else:
                     kb.button(text="▶️ Play video", url=url)
                 return await safe_edit(status, text, reply_markup=kb.as_markup())
+            if not config.PUBLIC_BASE_URL and Path(item.name).suffix.lower() in VIDEO_EXT:
+                text += "\n(Online playback is not enabled on this bot yet.)"
             text += f"\n\n<a href=\"{html.escape(item.dlink, quote=True)}\">Direct download link</a> (expires in a few hours)"
         return await safe_edit(status, text, disable_web_page_preview=True)
 
@@ -242,29 +244,71 @@ async def process(m: Message, item: FileItem, status: Message, user_id: int | No
         await db.log_download(uid, item.name, item.size, ok)
 
 
+async def start_tunnel() -> asyncio.subprocess.Process | None:
+    """Launch `cloudflared tunnel` and capture the public https URL."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "cloudflared", "tunnel", "--no-autoupdate", "--url", f"http://localhost:{config.WEB_PORT}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    except FileNotFoundError:
+        log.error("AUTO_TUNNEL=1 but `cloudflared` is not installed or not in PATH")
+        return None
+    try:
+        async def find_url():
+            while line := await proc.stderr.readline():
+                m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line.decode(errors="ignore"))
+                if m:
+                    return m.group(0)
+        url = await asyncio.wait_for(find_url(), 40)
+    except asyncio.TimeoutError:
+        url = None
+    if not url:
+        log.error("Could not get a tunnel URL from cloudflared")
+        proc.terminate()
+        return None
+    config.PUBLIC_BASE_URL = url
+    log.info("Tunnel ready: %s", url)
+
+    async def drain():  # keep the pipe empty so cloudflared never blocks
+        while await proc.stderr.readline():
+            pass
+    asyncio.create_task(drain())
+    return proc
+
+
 async def main():
     global tb
     await db.init()
     if not config.TERABOX_COOKIE:
-        log.warning('TERABOX_COOKIE is empty: most shares will return no download link')
+        log.warning("TERABOX_COOKIE is empty: most shares will return no download link")
     api = TelegramAPIServer.from_base(config.LOCAL_API_URL) if config.LOCAL_API_URL else None
     session = AiohttpSession(api=api) if api else AiohttpSession()
     bot = Bot(config.BOT_TOKEN, session=session,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=50)) as http:
         tb = TeraBoxClient(http, config.TERABOX_COOKIE)
-        runner = None
+        runner = await _start_web()
+        tunnel = None
+        if not config.PUBLIC_BASE_URL and config.AUTO_TUNNEL:
+            tunnel = await start_tunnel()
         if config.PUBLIC_BASE_URL:
-            runner = aiohttp.web.AppRunner(web.make_app(tb))
-            await runner.setup()
-            await aiohttp.web.TCPSite(runner, "0.0.0.0", config.WEB_PORT).start()
-            log.info("Stream server on :%s -> %s", config.WEB_PORT, config.PUBLIC_BASE_URL)
+            log.info("Play button ENABLED -> %s", config.PUBLIC_BASE_URL)
+        else:
+            log.warning("Play button DISABLED: set PUBLIC_BASE_URL or AUTO_TUNNEL=1")
         try:
             await dp.start_polling(bot)
         finally:
-            if runner:
-                await runner.cleanup()
+            if tunnel and tunnel.returncode is None:
+                tunnel.terminate()
+            await runner.cleanup()
             await db.close()
+
+
+async def _start_web():
+    runner = aiohttp.web.AppRunner(web.make_app(tb))
+    await runner.setup()
+    await aiohttp.web.TCPSite(runner, "0.0.0.0", config.WEB_PORT).start()
+    return runner
 
 
 if __name__ == "__main__":
