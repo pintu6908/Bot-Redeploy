@@ -11,7 +11,7 @@ _raw = os.getenv("TERABOX_COOKIE", "").strip()
 TERABOX_COOKIE = "" if not _raw else (_raw if "=" in _raw else f"ndus={_raw}")
 
 LOCAL_API_URL = os.getenv("LOCAL_API_URL", "").strip()
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "1900" if LOCAL_API_URL else "49"))
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "1900" if LOCAL_API_URL else "1900"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "3"))
 MAX_FILES_PER_LINK = int(os.getenv("MAX_FILES_PER_LINK", "10"))
 USER_COOLDOWN_SEC = int(os.getenv("USER_COOLDOWN_SEC", "5"))
