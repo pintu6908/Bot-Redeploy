@@ -52,6 +52,7 @@ class FileItem:
     fs_id: str
     dlink: str | None
     is_dir: bool = False
+    source_url: str = ""
 
 
 def _is_tb_host(host: str) -> bool:
@@ -198,6 +199,8 @@ class TeraBoxClient:
                         if raw:
                             files = await self._expand(base, token, sh, raw, max_files)
                             await self._fill_dlinks(base, token, sh, files)
+                            for f in files:
+                                f.source_url = url
                             return files
                     break  # token worked but no list; try next host
                 except TeraError as e:
@@ -254,4 +257,22 @@ class TeraBoxClient:
                 if total and done < total:
                     raise TeraError("Download was cut short. Please retry.")
                 return
+        raise TeraError("Too many redirects.")
+
+    async def open_stream(self, dlink: str, range_header: str | None = None) -> aiohttp.ClientResponse:
+        """Open the CDN response (caller must .release()). Supports Range for seeking."""
+        url = dlink
+        for _ in range(6):
+            headers = {"User-Agent": UA, "Referer": "https://www.terabox.com/"}
+            if range_header:
+                headers["Range"] = range_header
+            if self.cookie and _is_tb_host(urlparse(url).netloc):
+                headers["Cookie"] = self.cookie
+            r = await self.s.get(url, headers=headers, allow_redirects=False,
+                                 timeout=aiohttp.ClientTimeout(total=None, sock_connect=20, sock_read=60))
+            if r.status in (301, 302, 303, 307, 308):
+                url = str(r.url.join(URL(r.headers["Location"])))
+                r.release()
+                continue
+            return r
         raise TeraError("Too many redirects.")
