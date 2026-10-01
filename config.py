@@ -17,3 +17,9 @@ MAX_FILES_PER_LINK = int(os.getenv("MAX_FILES_PER_LINK", "10"))
 USER_COOLDOWN_SEC = int(os.getenv("USER_COOLDOWN_SEC", "5"))
 CACHE_TTL_SEC = 20 * 60  # dlinks expire; keep cache short
 DB_PATH = os.getenv("DB_PATH", "bot.db")
+
+# Streaming (Play button). Must be a public HTTPS URL pointing at this machine's WEB_PORT.
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
+STREAM_TTL_SEC = 6 * 3600
+MAX_STREAMS = int(os.getenv("MAX_STREAMS", "20"))
