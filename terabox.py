@@ -7,6 +7,7 @@ Uses the same web endpoints the TeraBox site uses (unofficial, may change):
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import logging
 import re
 from dataclasses import dataclass
@@ -33,10 +34,15 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 VIDEO_EXT = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
 
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
+# TeraBox's token is often a JS fragment value, not always hex. Accept the common
+# forms seen across the site and newer builds.
 _TOKEN_PATTERNS = (
-    re.compile(r"fn%28%22([^%\"]+)%22%29"),
-    re.compile(r"fn\(\"([0-9A-Fa-f]+)\"\)"),
-    re.compile(r"jsToken\"?\s*[:=]\s*\"([0-9A-Fa-f]+)\""),
+    re.compile(r"fn%28%22([^%\"]+)%22%29", re.I),
+    re.compile(r"fn\(\s*[\"']?([A-Za-z0-9_-]+)[\"']?\s*\)", re.I),
+    re.compile(r"jsToken\s*[:=]\s*[\"']?([A-Za-z0-9_-]+)[\"']?", re.I),
+    re.compile(r"[\"']jsToken[\"']\s*:\s*[\"']([A-Za-z0-9_-]+)[\"']", re.I),
+    re.compile(r"jsToken\s*[:=]\s*%22([^%]+)%22", re.I),
+    re.compile(r"token\s*[:=]\s*[\"']?([A-Za-z0-9_-]+)[\"']?", re.I),
 )
 
 
@@ -103,12 +109,16 @@ class TeraBoxClient:
         url = f"https://{host}/sharing/link?surl={surl_q}"
         async with self.s.get(url, headers=self._headers(), allow_redirects=True,
                               timeout=aiohttp.ClientTimeout(total=25)) as r:
-            html = await r.text()
+            html_text = await r.text()
             base = f"{r.url.scheme}://{r.url.host}"
+
+        decoded = html_lib.unescape(html_text)
         for pat in _TOKEN_PATTERNS:
-            m = pat.search(html)
+            m = pat.search(decoded)
             if m:
-                return m.group(1), base
+                token = m.group(1).strip()
+                if token and len(token) >= 4:
+                    return token, base
         raise TeraError("Could not read page token (link invalid, deleted, or TeraBox changed).")
 
     async def _list(self, base: str, token: str, shorturl: str, directory: str | None) -> list[dict]:
@@ -193,7 +203,10 @@ class TeraBoxClient:
             async with self.s.get(url, headers=headers, allow_redirects=False,
                                   timeout=aiohttp.ClientTimeout(total=None, sock_connect=20, sock_read=60)) as r:
                 if r.status in (301, 302, 303, 307, 308):
-                    url = str(r.url.join(URL(r.headers["Location"])))
+                    location = r.headers.get("Location")
+                    if not location:
+                        raise TeraError("Download redirect was missing a Location header.")
+                    url = str(URL(location))
                     continue
                 if r.status >= 400:
                     raise TeraError(f"Download server returned HTTP {r.status} (link may have expired).")
